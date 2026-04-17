@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Auxil</title>
+    </head>
+    <body>
+        <h1>Auxil</h1>
+        <p>Auxil is a web server that serves as an intermediary between clients and the Ollama language model server. It provides a RESTful API for clients to interact with the Ollama server, allowing them to send prompts and receive responses.</p>
+        <h2>API Endpoints</h2>
+        <ul>
+            <li><code>GET /</code>: A simple endpoint that returns a welcome message.</li>
+            <li><code>POST /api/generate</code>: An endpoint that accepts a JSON payload containing a prompt and a model, returning the response from the Ollama server.</li>
+        </ul>
+        <h2>Configuration</h2>
+        <p>The server can be configured using the <code>config.json</code> file, which allows you to specify CORS allowed origins, server port, Ollama port, and server address.</p>
+
+        <h2>Models</h2>
+        <div id="modelContainer"></div>
+        <script>
+            async function fetchModels() {
+                try {
+                    const res = await fetch("/api/models");
+                    const models = await res.json();
+
+                    const container = document.getElementById("modelContainer");
+                    container.innerHTML = "<h3>Available Models:</h3>";
+
+                    models.models.forEach(model => {
+                        const modelDiv = document.createElement("div");
+                        modelDiv.innerText = model;
+                        container.appendChild(modelDiv);
+                    });
+                } catch (err) {
+                    console.error("Error fetching models:", err);
+                }
+            }
+
+            fetchModels();
+        </script>
+
+        <h2>In-browser testing</h2>
+        <p>You can test the AI directly from this browser, do not expect high quality as most models used by this are low neuron count</p>
+        <form id="promptForm" action="/api/generate" method="POST">
+            <label for="modelInput">Model:</label><br>
+            <input type="text" id="modelInput" name="model" required><br>
+            <label for="promptInput">Enter your prompt:</label><br>
+            <input type="text" id="promptInput" name="prompt" required><br>
+            <input type="submit" value="Submit"><br/>
+            <span id="response">N/A</span>
+        </form>
+        <script>
+            document.getElementById("promptForm").addEventListener("submit", async (e) => {
+                e.preventDefault();
+
+                const model = document.getElementById("modelInput").value;
+                const prompt = document.getElementById("promptInput").value;
+
+                const res = await fetch("/api/generate", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ model, prompt })
+                });
+
+                const json = await res.json();
+                document.getElementById("response").innerText = json.response;
+            });
+        </script>
+    </body>
+</html>
