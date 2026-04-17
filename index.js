@@ -32,7 +32,8 @@ app.get('/', async (req, res) => {
     res.sendFile(__dirname + '/index.html');
 });
 
-app.get('/api/status', async (req, res) => {
+// Check if Ollama server is running and responding properly.
+app.get('/api/ollama/status', async (req, res) => {
     const promise = new Promise((resolve,reject) => {
         http.get(`http://localhost:${ollamaPort}`, (ollamaRes) => {
             if (ollamaRes.statusCode === 200) {
@@ -48,6 +49,11 @@ app.get('/api/status', async (req, res) => {
     } catch (e) {
         res.status(500).send(e);
     }
+});
+
+// Check if this server is running.
+app.get("/api/status", async (req, res) => {
+    res.send('Auxil server is running and responding properly.');
 });
 
 app.get("/api/models", async (req, res) => {
