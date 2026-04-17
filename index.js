@@ -10,17 +10,34 @@ const config = {
     corsAllowedOrigins: configJsonFile.corsAllowedOrigins || ["http://localhost:8000"],
     serverPort: configJsonFile.serverPort || 3000,
     ollamaPort: configJsonFile.ollamaPort || 10434,
-    serverAddress: configJsonFile.serverAddress || "localhost"
+    serverAddress: configJsonFile.serverAddress || "localhost",
+    concurrentThreads: configJsonFile.concurrentThreads || 2 // No generations are triggered beyond this.
 }
 config.corsAllowedOrigins.push(`http://${config.serverAddress}:${config.serverPort}`); // Ensure the server's own address is allowed for CORS
 config.corsAllowedOrigins.push(`http://localhost:${config.serverPort}`); // Ensure the server's own address is allowed for CORS
 
 const app = express();
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 app.use(cors({
-    origin: config.corsAllowedOrigins,
+  origin: function (origin, callback) {
+    // allow requests with no origin (like curl, Postman)
+    if (!origin) return callback(null, true);
+
+    if (config.corsAllowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS: ' + origin));
+    }
+  },
     optionsSuccessStatus: 200
 }));
 app.use(express.json());
+
+const queue = [];
+let activeThreads = 0;
 
 const ollamaPort = config.ollamaPort; // Ensure this matches the port used in ollamaserve.js
 
@@ -110,9 +127,11 @@ async function isModelLoaded(modelName)
     }catch(e){return false;}
 }
 
-app.get("/api/load",async (req,res)=>{
+app.post("/api/load",async (req,res)=>{
     const model = req.body.model
     const prompt = req.body.prompt
+    const options = req.body.options || {};
+    const format = req.body.format || undefined;    
     if (!model) {
         res.status(400).json({ error: 'Missing model in request body' });
         return;
@@ -122,7 +141,7 @@ app.get("/api/load",async (req,res)=>{
         if (loaded) {
             res.json({ message: `Model '${model}' is already loaded.` });
         } else {
-            const result = await generate(model, prompt || "Hello, load this model!");
+            const result = await generate(model, prompt || "Hello, load this model!", options, format);
             if (result.error) {
                 res.status(result.status || 500).json({ error: `Failed to load model '${model}'`, details: result.details });
             } else {
@@ -134,7 +153,7 @@ app.get("/api/load",async (req,res)=>{
     }
 })
 
-async function generate(model,prompt)
+async function generate(model,prompt,options, format = undefined)
 {
     if (!model || !prompt) {
         return { error: 'Missing model or prompt', status: 400 };
@@ -183,7 +202,9 @@ async function generate(model,prompt)
             result = await callOllama("/api/generate", {
                 model,
                 prompt,
-                stream: false
+                stream: false,
+                options,
+                format: format
             });
         } catch (err) {
             if (err.type !== "NOT_FOUND") throw err;
@@ -194,13 +215,16 @@ async function generate(model,prompt)
                 messages: [
                     { role: "user", content: prompt }
                 ],
-                stream: false
+                stream: false,
+                options,
+                format: format
             });
         }
 
-        return JSON.parse(result)
+        return typeof result === "string" ? JSON.parse(result) : result
 
     } catch (err) {
+		console.error(err)
         return { error: 'Failed to generate response from Ollama', details: err, status: 500 };
     }
 }
@@ -208,9 +232,30 @@ async function generate(model,prompt)
 app.post("/api/generate", async (req, res) => {
     const model = req.body.model;
     const prompt = req.body.prompt;
+    const options = req.body.options || {};
+    const format = req.body.format || undefined;
 
-    const result = await generate(model, prompt);
-    res.status(result.status || 200).json(result);
+    const promise = new Promise((resolve) => {
+        queue.push(async () => {
+            activeThreads++;
+            try {
+                const result = await generate(model, prompt, options, format);
+                resolve(result);
+            } catch (err) {
+                resolve({ error: 'Failed to process generation task', details: err, status: 500 });
+            } finally {
+                activeThreads--;
+                onTaskAdded();
+            }
+        });
+        onTaskAdded();
+    });
+    const result = await promise;
+    if (result.error) {
+        res.status(result.status || 500).json({ error: result.error, details: result.details });
+    } else {
+        res.json(result);
+    }
 });
 
 ollama.start(ollamaPort).then(()=>{
@@ -232,3 +277,11 @@ ollama.start(ollamaPort).then(()=>{
     console.error('Auxil will now exit. Please fix the issue and restart Auxil.');
     process.exit(1);
 });
+
+function onTaskAdded()
+{
+    while (activeThreads < config.concurrentThreads && queue.length > 0) {
+        const task = queue.shift();
+        task();
+    }
+}

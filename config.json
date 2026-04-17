@@ -1,6 +1,7 @@
 {
-    "corsAllowedOrigins": ["http://192.168.20.99:8000"],
+    "corsAllowedOrigins": ["http://192.168.20.99:8000","http://localhost:8000"],
     "serverPort": 3000,
     "ollamaPort": 10434,
-    "serverAddress": "0.0.0.0"
+    "serverAddress": "0.0.0.0",
+    "concurrentThreads": 2
 }
