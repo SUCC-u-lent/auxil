@@ -7,6 +7,8 @@ const http = require('http');
 // Load configuration
 const configJsonFile = JSON.parse(require('fs').readFileSync('config.json', 'utf-8'));
 const config = {
+    model: configJsonFile.model || "gpt-3.5-turbo",
+    embeddingModel: configJsonFile.embeddingModel || "nomic-embed-text",
     corsAllowedOrigins: configJsonFile.corsAllowedOrigins || ["http://localhost:8000"],
     serverPort: configJsonFile.serverPort || 3000,
     ollamaPort: configJsonFile.ollamaPort || 10434,
@@ -150,6 +152,88 @@ app.post("/api/load",async (req,res)=>{
         }     
     } catch (err) {
         res.status(500).json({ error: 'Failed to load model', details: err });
+    }
+})
+
+app.post("/api/embed", async (req, res) => {
+    const model = req.body.model;
+    const input = req.body.input;
+    const truncate = req.body.truncate || true;
+    const dimensions = req.body.dimensions || 1024;
+    const keep_alive = req.body.keep_alive || "5m";
+    const options = req.body.options || {};
+
+    if (!model || !input) {
+        res.status(400).json({ error: 'Missing model or input in request body' });
+        return;
+    }
+
+    const promise = new Promise((resolve) => {
+        queue.push(async () => {
+            activeThreads++;
+            try {
+                const req = http.request(
+                    `http://localhost:${ollamaPort}/api/embed`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json"
+                        }
+                    },
+                    (res) => {
+                        let data = "";
+
+                        res.on("data", (chunk) => {
+                            data += chunk;
+                        });
+
+                        res.on("end", () => {
+                            try {
+                                const json = JSON.parse(data);
+                                resolve(json);
+                            } catch (e) {
+                                resolve({
+                                    error: "Invalid JSON from Ollama",
+                                    details: e,
+                                    status: 500
+                                });
+                            }
+                        });
+                    }
+                );
+
+                req.on("error", (err) => {
+                    resolve({
+                        error: "Ollama API is not responding properly.",
+                        details: err,
+                        status: 500
+                    });
+                });
+
+                req.write(JSON.stringify({
+                    model,
+                    input, // ✅ correct per Ollama
+                    truncate,
+                    dimensions,
+                    keep_alive,
+                    options
+                }));
+
+                req.end();
+            } catch (err) {
+                resolve({ error: 'Failed to process generation task', details: err, status: 500 });
+            } finally {
+                activeThreads--;
+                onTaskAdded();
+            }
+        });
+        onTaskAdded();
+    });
+    const result = await promise;
+    if (result.error) {
+        res.status(result.status || 500).json({ error: result.error, details: result.details });
+    } else {
+        res.json(result);
     }
 })
 
