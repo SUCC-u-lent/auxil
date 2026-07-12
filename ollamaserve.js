@@ -17,9 +17,13 @@ function waitForOllama(port) {
   });
 }
 
-function start(port = 11434) {
+function start(port = 11434, keepModelsInMemory = false) {
   if (ollamaProcess) {
     return Promise.resolve(); // already running
+  }
+
+  if (keepModelsInMemory) {
+    envVars.OLLAMA_KEEP_ALIVE = "-1";
   }
 
   ollamaProcess = spawn('ollama', ['serve'], {
@@ -49,10 +53,10 @@ function stop() {
   shuttingDown = true;
 
   try {
-    ollamaProcess.kill('SIGTERM');
-
-    if (ollamaProcess.pid) {
-      process.kill(ollamaProcess.pid, 'SIGTERM');
+    if (process.platform === 'win32') {
+      execSync(`taskkill /pid ${ollamaProcess.pid} /f /t`, { stdio: 'ignore' });
+    } else {
+      ollamaProcess.kill('SIGTERM');
     }
   } catch (e) {
     // ignore if already dead

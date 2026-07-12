@@ -1,11 +1,22 @@
 const express = require('express');
 const cors = require('cors');
+const http = require('http');
+const fs = require('fs');
 
 const ollama = require('./ollamaserve');
-const http = require('http');
+const {
+    init,
+    stop,
+    stopProcessing,
+    enqueueRequest,
+    dequeueRequest,
+    getRequest
+} = require('./client_queue');
+const { ClientRequest, RequestState } = require('./utilities/request');
 
-// Load configuration
-const configJsonFile = JSON.parse(require('fs').readFileSync('config.json', 'utf-8'));
+// Load config
+const configJsonFile = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
+
 const config = {
     model: configJsonFile.model || "gpt-3.5-turbo",
     embeddingModel: configJsonFile.embeddingModel || "nomic-embed-text",
@@ -13,359 +24,232 @@ const config = {
     serverPort: configJsonFile.serverPort || 3000,
     ollamaPort: configJsonFile.ollamaPort || 10434,
     serverAddress: configJsonFile.serverAddress || "localhost",
-    concurrentThreads: configJsonFile.concurrentThreads || 2 // No generations are triggered beyond this.
-}
-config.corsAllowedOrigins.push(`http://${config.serverAddress}:${config.serverPort}`); // Ensure the server's own address is allowed for CORS
-config.corsAllowedOrigins.push(`http://localhost:${config.serverPort}`); // Ensure the server's own address is allowed for CORS
+    concurrentThreads: configJsonFile.concurrentThreads || 2,
+    keepModelsInMemory: configJsonFile.keepModelsInMemory || false
+};
+
+config.corsAllowedOrigins.push(`http://${config.serverAddress}:${config.serverPort}`);
+config.corsAllowedOrigins.push(`http://localhost:${config.serverPort}`);
 
 const app = express();
-app.use('/api', (req, res, next) => {
-  res.set('Cache-Control', 'no-store');
-  next();
-});
-app.use(cors({
-  origin: function (origin, callback) {
-    // allow requests with no origin (like curl, Postman)
-    if (!origin) return callback(null, true);
 
-    if (config.corsAllowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS: ' + origin));
-    }
-  },
+app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+});
+
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (config.corsAllowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS: ' + origin));
+        }
+    },
     optionsSuccessStatus: 200
 }));
+
 app.use(express.json());
 
-const queue = [];
-let activeThreads = 0;
-
-const ollamaPort = config.ollamaPort; // Ensure this matches the port used in ollamaserve.js
-
-const port = config.serverPort;
-const ipAdress = config.serverAddress;
-
-app.get('/', async (req, res) => {
-    // Send the index.html
-    res.sendFile(__dirname + '/index.html');
-});
-
-// Check if Ollama server is running and responding properly.
-app.get('/api/ollama/status', async (req, res) => {
-    const promise = new Promise((resolve,reject) => {
-        http.get(`http://localhost:${ollamaPort}`, (ollamaRes) => {
-            if (ollamaRes.statusCode === 200) {
-                resolve('Ollama is running and responding properly.');
-            } else {
-                reject(`Ollama responded with status code: ${ollamaRes.statusCode}`);
-            }
-        }).on('error', (err) => {reject(err)});
+// All requests start with /api/, this is the base path for all requests
+const requestSource = "/api/";
+app.post(requestSource + 'generate', (req, res) => {
+    // send request to ollama server to generate text
+    // check for the following content in the request body
+    // model : string : required
+    // prompt : string
+    // suffix : string
+    // format : string
+    // system : string
+    // stream : boolean
+    // think : boolean
+    // raw : boolean
+    // keep_alive : string
+    // options : object
+    // logprobs : boolean
+    // top_logprobs : integer
+    const requestBody = req.body;
+    const model = requestBody.model || config.model;
+    const prompt = requestBody.prompt || "";
+    const suffix = requestBody.suffix || "";
+    const format = requestBody.format || "text";
+    const system = requestBody.system || "";
+    const stream = requestBody.stream || false;
+    const think = requestBody.think || false;
+    const raw = requestBody.raw || false;
+    const keep_alive = requestBody.keep_alive || "";
+    const options = requestBody.options || {};
+    const logprobs = requestBody.logprobs || false;
+    const top_logprobs = requestBody.top_logprobs || 0;
+    const requestOptions = {
+        model: model,
+        prompt: prompt,
+        suffix: suffix,
+        format: format,
+        system: system,
+        stream: stream,
+        think: think,
+        raw: raw,
+        keep_alive: keep_alive,
+        options: options,
+        logprobs: logprobs,
+        top_logprobs: top_logprobs
+    };
+    const clientRequest = new ClientRequest(`http://localhost:${config.ollamaPort}/api/generate`, 'POST', requestOptions, {
+        'Content-Type': 'application/json'
     });
-    try {
-        const status = await promise;
-        res.send(status);
-    } catch (e) {
-        res.status(500).send(e);
+    enqueueRequest(clientRequest);
+})
+
+app.post(requestSource + 'chat', (req, res) => {
+    // send request to ollama server to generate embeddings
+    // check for the following content in the request body
+// model
+// stringrequired
+// Model name
+// messages
+// object[]required
+// tools
+// object[]
+// format
+// enum<string>
+// options
+// object
+// stream
+// booleandefault:true
+// think
+// boolean
+// keep_alive
+// string
+// logprobs
+// boolean
+// top_logprobs
+// integer
+    const requestBody = req.body;
+    const model = requestBody.model || config.model;
+    const messages = requestBody.messages || [];
+    const tools = requestBody.tools || [];
+    const format = requestBody.format || "text";
+    const options = requestBody.options || {};
+    const stream = requestBody.stream || true;
+    const think = requestBody.think || false;
+    const keep_alive = requestBody.keep_alive || "";
+    const logprobs = requestBody.logprobs || false;
+    const top_logprobs = requestBody.top_logprobs || 0;
+    const requestOptions = {
+        model: model,
+        messages: messages,
+        tools: tools,
+        format: format,
+        options: options,
+        stream: stream,
+        think: think,
+        keep_alive: keep_alive,
+        logprobs: logprobs,
+        top_logprobs: top_logprobs
+    };
+    const clientRequest = new ClientRequest(`http://localhost:${config.ollamaPort}/api/chat`, 'POST', requestOptions, {
+        'Content-Type': 'application/json'
+    });
+    enqueueRequest(clientRequest);
+})
+
+app.post(requestSource + 'embed', (req, res) => {
+    // send request to ollama server to generate embeddings
+    // check for the following content in the request body
+// model
+// stringrequired
+// input
+// string
+// required
+// truncate
+// booleandefault:true
+// dimensions
+// integer
+// keep_alive
+// string
+// options
+// object
+    const requestBody = req.body;
+    const model = requestBody.model || config.embeddingModel;
+    const input = requestBody.input || "";
+    const truncate = requestBody.truncate || true;
+    const dimensions = requestBody.dimensions || 0;
+    const keep_alive = requestBody.keep_alive || "";
+    const options = requestBody.options || {};
+    const requestOptions = {
+        model: model,
+        input: input,
+        truncate: truncate,
+        dimensions: dimensions,
+        keep_alive: keep_alive,
+        options: options
+    };
+    const clientRequest = new ClientRequest(`http://localhost:${config.ollamaPort}/api/embed`, 'POST', requestOptions, {
+        'Content-Type': 'application/json'
+    });
+    enqueueRequest(clientRequest);
+})
+
+app.get(requestSource + 'request/status/:id', (req, res) => {
+    const requestId = req.params.id;
+    const clientRequest = getRequest(requestId);
+    if (!clientRequest) {
+        res.status(404).json({ error: 'Request not found' });
+        return;
     }
+    res.json({
+        id: clientRequest.getId(),
+        status: clientRequest.getStatus()
+    });
 });
 
-// Check if this server is running.
-app.get("/api/status", async (req, res) => {
-    res.send('Auxil server is running and responding properly.');
+app.get(requestSource + 'request/result/:id', (req, res) => {
+    const requestId = req.params.id;
+    const clientRequest = getRequest(requestId);
+    if (!clientRequest) {
+        res.status(404).json({ error: 'Request not found' });
+        return;
+    }
+    if (clientRequest.getStatus() !== RequestState.FULFILLED) {
+        res.status(400).json({ error: 'Request not fulfilled yet' });
+        return;
+    }
+    res.json({
+        id: clientRequest.getId(),
+        result: clientRequest.getResult()
+    });
 });
 
-app.get("/api/models", async (req, res) => {
-    http.get(`http://localhost:${ollamaPort}/api/tags`, (ollamaRes) => {
-        if (ollamaRes.statusCode !== 200) {
-            res.status(ollamaRes.statusCode).send(`Ollama API responded with status code: ${ollamaRes.statusCode}`);
-            return;
-        }
+
+app.get(requestSource + 'models', (req, res) => {
+    // Send request to ollama server to get models
+    http.get(`http://localhost:${config.ollamaPort}/api/tags`, (ollamaRes) => {
         let data = '';
         ollamaRes.on('data', (chunk) => {
             data += chunk;
         });
         ollamaRes.on('end', () => {
-            try {
-                const json = JSON.parse(data);
-                const models = json.models.map(m => m.name);
-                res.json({ models });
-            } catch (e) {
-                res.status(500).send('Ollama API responded with invalid JSON.');
-            }
+            res.json(JSON.parse(data));
         });
     }).on('error', (err) => {
-        res.status(500).send('Ollama API is not responding properly.');
+        res.status(500).json({ error: 'Failed to fetch models' });
     });
-})
-
-async function isModelLoaded(modelName)
-{
-    const prm = new Promise((resolve, reject) => {
-        http.get(`http://localhost:${ollamaPort}/api/ps`, (ollamaRes) => {
-            if (ollamaRes.statusCode !== 200) {
-                reject(`Ollama API responded with status code: ${ollamaRes.statusCode}`);
-                return;
-            }
-            let data = '';
-            ollamaRes.on('data', (chunk) => {
-                data += chunk;
-            })
-            ollamaRes.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    const isLoaded = json.models.some(p => p.model === modelName);
-                    resolve(isLoaded);
-                } catch (e) {
-                    reject('Ollama API responded with invalid JSON.');
-                }
-            })
-        }).on('error', (err) => {
-            reject('Ollama API is not responding properly.');
-        });
-    });
-    try{
-        return await prm;
-    }catch(e){return false;}
-}
-
-app.post("/api/load",async (req,res)=>{
-    const model = req.body.model
-    const prompt = req.body.prompt
-    const options = req.body.options || {};
-    const format = req.body.format || undefined;    
-    if (!model) {
-        res.status(400).json({ error: 'Missing model in request body' });
-        return;
-    }
-    try {
-        const loaded = await isModelLoaded(model);  
-        if (loaded) {
-            res.json({ message: `Model '${model}' is already loaded.` });
-        } else {
-            const result = await generate(model, prompt || "Hello, load this model!", options, format);
-            if (result.error) {
-                res.status(result.status || 500).json({ error: `Failed to load model '${model}'`, details: result.details });
-            } else {
-                res.json({ message: `Model '${model}' loaded successfully.`, details: result });
-            }
-        }     
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to load model', details: err });
-    }
-})
-
-app.post("/api/embed", async (req, res) => {
-    const model = req.body.model;
-    const input = req.body.input;
-    const truncate = req.body.truncate || true;
-    const dimensions = req.body.dimensions || 1024;
-    const keep_alive = req.body.keep_alive || "5m";
-    const options = req.body.options || {};
-
-    if (!model || !input) {
-        res.status(400).json({ error: 'Missing model or input in request body' });
-        return;
-    }
-
-    const promise = new Promise((resolve) => {
-        queue.push(async () => {
-            activeThreads++;
-            try {
-                const req = http.request(
-                    `http://localhost:${ollamaPort}/api/embed`,
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json"
-                        }
-                    },
-                    (res) => {
-                        let data = "";
-
-                        res.on("data", (chunk) => {
-                            data += chunk;
-                        });
-
-                        res.on("end", () => {
-                            try {
-                                const json = JSON.parse(data);
-                                resolve(json);
-                            } catch (e) {
-                                resolve({
-                                    error: "Invalid JSON from Ollama",
-                                    details: e,
-                                    status: 500
-                                });
-                            }
-                        });
-                    }
-                );
-
-                req.on("error", (err) => {
-                    resolve({
-                        error: "Ollama API is not responding properly.",
-                        details: err,
-                        status: 500
-                    });
-                });
-
-                req.write(JSON.stringify({
-                    model,
-                    input, // ✅ correct per Ollama
-                    truncate,
-                    dimensions,
-                    keep_alive,
-                    options
-                }));
-
-                req.end();
-            } catch (err) {
-                resolve({ error: 'Failed to process generation task', details: err, status: 500 });
-            } finally {
-                activeThreads--;
-                onTaskAdded();
-            }
-        });
-        onTaskAdded();
-    });
-    const result = await promise;
-    if (result.error) {
-        res.status(result.status || 500).json({ error: result.error, details: result.details });
-    } else {
-        res.json(result);
-    }
-})
-
-async function generate(model,prompt,options, format = undefined)
-{
-    if (!model || !prompt) {
-        return { error: 'Missing model or prompt', status: 400 };
-    }
-
-    const callOllama = (path, payload) => {
-        return new Promise((resolve, reject) => {
-            const request = http.request(
-                `http://localhost:${ollamaPort}${path}`,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    }
-                },
-                (ollamaRes) => {
-                    let data = "";
-
-                    ollamaRes.on("data", chunk => data += chunk);
-
-                    ollamaRes.on("end", () => {
-                        if (ollamaRes.statusCode === 404) {
-                            return reject({ type: "NOT_FOUND" });
-                        }
-
-                        try {
-                            resolve(JSON.parse(data));
-                        } catch {
-                            reject({ type: "INVALID_JSON", data });
-                        }
-                    });
-                }
-            );
-
-            request.on("error", reject);
-            request.write(JSON.stringify(payload));
-            request.end();
-        });
-    };
-
-    try {
-        let result;
-
-        // 1️⃣ Try /api/generate
-        try {
-            result = await callOllama("/api/generate", {
-                model,
-                prompt,
-                stream: false,
-                options,
-                format: format
-            });
-        } catch (err) {
-            if (err.type !== "NOT_FOUND") throw err;
-
-            // 2️⃣ fallback to /api/chat
-            result = await callOllama("/api/chat", {
-                model,
-                messages: [
-                    { role: "user", content: prompt }
-                ],
-                stream: false,
-                options,
-                format: format
-            });
-        }
-
-        return typeof result === "string" ? JSON.parse(result) : result
-
-    } catch (err) {
-		console.error(err)
-        return { error: 'Failed to generate response from Ollama', details: err, status: 500 };
-    }
-}
-
-app.post("/api/generate", async (req, res) => {
-    const model = req.body.model;
-    const prompt = req.body.prompt;
-    const options = req.body.options || {};
-    const format = req.body.format || undefined;
-
-    const promise = new Promise((resolve) => {
-        queue.push(async () => {
-            activeThreads++;
-            try {
-                const result = await generate(model, prompt, options, format);
-                resolve(result);
-            } catch (err) {
-                resolve({ error: 'Failed to process generation task', details: err, status: 500 });
-            } finally {
-                activeThreads--;
-                onTaskAdded();
-            }
-        });
-        onTaskAdded();
-    });
-    const result = await promise;
-    if (result.error) {
-        res.status(result.status || 500).json({ error: result.error, details: result.details });
-    } else {
-        res.json(result);
-    }
 });
 
-ollama.start(ollamaPort).then(()=>{
+// ===========
+// START SERVER
+// =========================
+ollama.start(config.ollamaPort, config.keepModelsInMemory).then(() => {
+
     console.clear();
-    console.log('Configuration loaded:');
-    console.log(`CORS Allowed Origins: ${config.corsAllowedOrigins.join(', ')}`);
-    console.log(`Server Port: ${config.serverPort}`);
-    console.log(`Ollama Port: ${config.ollamaPort}`);
-    console.log(`Server Address: ${config.serverAddress}`);
-    console.log()
-    console.log('Ollama server started successfully.');
-    app.listen(port, ipAdress, () => {
-        console.log(`Server is running on http://${ipAdress}:${port}`);
-    });
-})
-.catch((err)=>{
-    console.error('Failed to start Ollama server:', err);
-    console.error('Please ensure that Ollama is installed and properly configured.');
-    console.error('Auxil will now exit. Please fix the issue and restart Auxil.');
-    process.exit(1);
-});
+    console.log("Auxil started");
 
-function onTaskAdded()
-{
-    while (activeThreads < config.concurrentThreads && queue.length > 0) {
-        const task = queue.shift();
-        task();
-    }
-}
+    app.listen(config.serverPort, config.serverAddress, () => {
+        console.log(`Running on http://${config.serverAddress}:${config.serverPort}`);
+    });
+
+}).catch(err => {
+    console.error("Failed to start:", err);
+});

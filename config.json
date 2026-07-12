@@ -3,5 +3,6 @@
     "serverPort": 3000,
     "ollamaPort": 10434,
     "serverAddress": "0.0.0.0",
-    "concurrentThreads": 2
+    "concurrentThreads": 2,
+    "model": "qwen2.5:3b-instruct-q4_0"
 }
